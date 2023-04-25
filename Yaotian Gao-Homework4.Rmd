@@ -1,0 +1,153 @@
+## simulated phenotype
+source("http://zzlab.net/GAPIT/gapit_functions.txt") 
+myGD=read.table(file="E:/Genomic Statistics/Homework4/GAPIT.Genotype.Numerical.txt",head=T) 
+myGM=read.table(file="E:Genomic Statistics/Homework4/GAPIT.Genotype.map.txt",head=T)
+
+set.seed(99164) 
+
+# Initialize the resulting matrix
+result_matrix <- matrix(nrow = 40, ncol = 4)
+colnames(result_matrix) <- c("NQTN", "ru2_MAS", "ru2_gBLUP", "ru2_M_G")
+rownames(result_matrix) <- paste("NQTN", seq(5, 200, 5), sep="_")
+
+# set repeat count
+n_repeats <- 30
+
+# Loop over different NQTN values
+for (i in seq(5, 110, 5)) {
+  # Initialize temporary matrix
+  temp_matrix <- matrix(nrow = n_repeats, ncol = 3)
+  colnames(temp_matrix) <- c("ru2_MAS", "ru2_gBLUP", "ru2_M_G")
+  
+  for (j in 1:n_repeats) {
+
+    mySim=GAPIT.Phenotype.Simulation(GD=myGD, GM=myGM,
+    h2=.7,
+    NQTN=i, 
+    QTNDist="normal")
+
+    n=nrow(myGD)
+    
+    # Divide the population into training and validation populations
+    testing=sample(n,round(n/5),replace=F)                            
+    training=-testing
+  
+    #Gene mapping (GWAS)
+    myGAPIT3 <- GAPIT(
+    Y=mySim$Y[training,], 
+  
+    #Only use the training training set
+    GD=myGD,GM=myGM, PCA.total=3,model="BLINK",                             QTN.position=mySim$QTN.position,
+    memo="GWAS")
+    
+    index=myGAPIT3$GWAS[,4]<0.05/length(myGAPIT3$GWAS[,4])
+    myQTN=cbind(myGAPIT3$PCA,myGD[,c(FALSE,index)])
+    myGD.I=myGD[,c(TRUE,index)]
+    myGM.I=myGM[index,]
+  
+    ## 做MAS
+    myGAPIT4 <- GAPIT(
+    Y=mySim$Y[training,],
+    CV=myQTN, 
+    model="GLM",  
+    SNP.test=FALSE,
+    memo="MAS")
+    
+   
+    order=match(mySim$Y[,1],myGAPIT4$Pred[,1])
+    myPred=myGAPIT4$Pred[order,]
+    ru2_MAS=cor(myPred[testing,8],mySim$u[testing])^2
+  
+    ## gBLUP
+    myGAPIT5 <- GAPIT(
+    Y=mySim$Y[training,],
+    GD=myGD, 
+    GM=myGM,
+    PCA.total=3,
+    model="gBLUP", 
+    SNP.test=FALSE,
+    memo="gBLUP")
+    order=match(mySim$Y[,1],myGAPIT5$Pred[,1])
+    myPred=myGAPIT5$Pred[order,]
+    ru2_gBLUP=cor(as.numeric(myPred[testing,5]),mySim$u[testing])^2
+
+    ## GWAS+gBLUP
+    myGAPIT6<- GAPIT(
+    Y=mySim$Y[training,],
+    GD=myGD, GM=myGM,
+    CV=myQTN,
+    model="gBLUP", 
+    SNP.test=FALSE,
+    memo="MAS+gBLUP")
+
+    order=match(mySim$Y[,1],myGAPIT6$Pred[,1])
+    myPred=myGAPIT6$Pred[order,]
+    ru2_M_G=cor(myPred[testing,8],mySim$u[testing])^2
+    
+     # save interim results
+    temp_matrix[j, ] <- c(ru2_MAS, ru2_gBLUP, ru2_M_G)
+  }
+    
+  # Compute mean and save to result matrix
+  result_matrix[paste("NQTN", i, sep="_"), ] <- c(i, colMeans(temp_matrix))
+}
+
+
+library(ggplot2)
+result_matrix <- as.data.frame(result_matrix)
+result_matrix$NQTN <- as.integer(result_matrix$NQTN)
+
+ggplot(data = result_matrix, aes(x = NQTN)) +
+  geom_line(aes(y = ru2_MAS, color = "MAS")) +
+  geom_line(aes(y = ru2_gBLUP, color = "gBLUP")) +
+  geom_line(aes(y = ru2_M_G, color = "GWAS + gBLUP")) +
+  labs(title = "R² values for MAS, gBLUP, and GWAS+gBLUP with varying NQTN,no replication",
+       x = "NQTN",
+       y = "R² values",
+       color = "Methods")
+
+
+# Calculate the degree of improvement of ru2_M_G relative to ru2_MAS and ru2_gBLUP
+result_matrix$MAS_improvement <- (result_matrix$ru2_M_G - result_matrix$ru2_MAS) / result_matrix$ru2_MAS * 100
+result_matrix$gBLUP_improvement <- (result_matrix$ru2_M_G - result_matrix$ru2_gBLUP) / result_matrix$ru2_gBLUP * 100
+
+#install.packages("segmented")
+library(segmented)
+
+# MAS_improvement
+MAS_lm <- lm(MAS_improvement ~ NQTN, data = result_matrix)
+MAS_seg <- segmented(MAS_lm, seg.Z = ~NQTN)
+MAS_breakpoint <- as.numeric(MAS_seg$psi[1])
+
+cat("MAS_improvement breakpoint (NQTN):", MAS_breakpoint, "\n")
+
+# gBLUP_improvement
+gBLUP_lm <- lm(gBLUP_improvement ~ NQTN, data = result_matrix)
+gBLUP_seg <- segmented(gBLUP_lm, seg.Z = ~NQTN)
+gBLUP_breakpoint <- as.numeric(gBLUP_seg$psi[1])
+
+cat("gBLUP_improvement breakpoint (NQTN):", gBLUP_breakpoint, "\n")
+
+# Remove NA values
+MAS_improvement_noNA <- result_matrix$MAS_improvement[!is.na(result_matrix$MAS_improvement)]
+NQTN_noNA <- result_matrix$NQTN[!is.na(result_matrix$MAS_improvement)]
+
+# Find the minimum NQTN value with MAS_improvement >= 5
+min_nqtn <- min(NQTN_noNA[MAS_improvement_noNA >= 5])
+
+# Draw two polylines on the same graph
+plot(result_matrix$NQTN, result_matrix$MAS_improvement, type="l", col="red", ylim=c(min(c(result_matrix$MAS_improvement, result_matrix$gBLUP_improvement), na.rm = TRUE), max(c(result_matrix$MAS_improvement, result_matrix$gBLUP_improvement), na.rm = TRUE)), xlab="NQTN", ylab="Improvement")
+lines(result_matrix$NQTN, result_matrix$gBLUP_improvement, col="blue")
+
+# add vertical line
+abline(v=min_nqtn, col="green", lty=2)
+abline(v=MAS_breakpoint, col="purple", lty=2)
+
+# add legend
+legend("topright", legend=c("MAS_improvement", "gBLUP_improvement", paste("MAS_improvement >= 5 (NQTN =", min_nqtn, ")"), paste("MAS_breakpoint (NQTN =", MAS_breakpoint, ")")), col=c("red", "blue", "green", "purple"), lty=c(1, 1, 1, 1), cex=0.5)
+
+# add title
+title("Comparison of MAS and gBLUP Improvement,norep")
+
+# Export result_matrix to result_matrix.txt file
+write.table(result_matrix, file = "result_matrix.txt", sep = "\t", row.names = FALSE, col.names = TRUE)
